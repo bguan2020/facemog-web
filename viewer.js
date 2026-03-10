@@ -28,23 +28,21 @@ let pinchDist = 0;
 
     try {
         // Resolve share → get presigned URL
+        console.log('[FaceMog] Fetching share:', shareId);
         const res = await fetch(`${API_BASE}/v1/share/${shareId}`);
-        if (!res.ok) throw new Error('Share not found');
+        if (!res.ok) throw new Error(`Share API returned ${res.status}`);
         const shareData = await res.json();
+        console.log('[FaceMog] Share resolved, fetching result.json...');
 
         // Fetch result.json
         const jsonRes = await fetch(shareData.jsonUrl);
-        if (!jsonRes.ok) throw new Error('Result data unavailable');
+        if (!jsonRes.ok) throw new Error(`Result JSON returned ${jsonRes.status}`);
         const data = await jsonRes.json();
-
-        // Update OG preview image if available
-        if (shareData.previewUrl) {
-            setMetaTag('og:image', shareData.previewUrl);
-        }
+        console.log('[FaceMog] Result loaded, verts:', data.mesh?.n_verts, 'transforms:', data.transformDefs?.length);
 
         initViewer(data);
     } catch (e) {
-        console.error('Failed to load share:', e);
+        console.error('[FaceMog] Failed to load share:', e);
         showError();
     }
 })();
