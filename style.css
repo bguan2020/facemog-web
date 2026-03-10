@@ -102,6 +102,36 @@ body {
     border-radius: 2px;
 }
 
+/* ── ChadMaxx ── */
+#chadmaxx {
+    padding: 8px 16px 10px;
+    border-bottom: 1px solid #1a1a24;
+    flex-shrink: 0;
+}
+.chadmaxx-header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 6px;
+}
+.chadmaxx-label {
+    font-size: 13px; font-weight: 800; letter-spacing: 1px;
+    background: linear-gradient(135deg, #f97316, #ef4444);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+.chadmaxx-pct {
+    font-size: 12px; font-weight: 700; color: #f97316;
+    font-variant-numeric: tabular-nums;
+}
+.chadmaxx-range {
+    background: linear-gradient(90deg, #222, rgba(249,115,22,0.3)) !important;
+}
+.chadmaxx-range::-webkit-slider-thumb {
+    background: linear-gradient(135deg, #f97316, #ef4444) !important;
+}
+.chadmaxx-range::-moz-range-thumb {
+    background: linear-gradient(135deg, #f97316, #ef4444) !important;
+}
+
 /* ── Categories ── */
 #categories {
     display: flex; gap: 8px;

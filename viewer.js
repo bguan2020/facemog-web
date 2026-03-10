@@ -4,16 +4,21 @@
 const API_BASE = 'https://c969ue4f2j.execute-api.us-east-1.amazonaws.com/prod';
 
 // ── State ──
-let scene, camera, renderer, mesh, geometry;
+let scene, camera, renderer, mesh, geometry, meshGroup;
 let origPositions, deformedPositions, vertexNormals;
 let numVerts, transformDefs, landmarks, frame;
 let precomputed = [];
 let sliderValues = {};
 let selectedCategory = '';
 
-// Camera orbit
-let camTheta = 0, camPhi = 0.1, camDist = 0;
-let camCenter = new THREE.Vector3();
+// ChadMaxx state
+let chadmaxxIntensity = 1.0; // Start at full intensity (like app)
+let manualOverrides = new Set();
+let hasChadmaxx = false;
+
+// Camera orbit — yaw only (like mobile app)
+let yawAngle = 0.3; // ~17 deg starting angle
+let camDist = 0;
 let autoRotate = true;
 let lastTime = 0;
 
@@ -27,14 +32,12 @@ let pinchDist = 0;
     if (!shareId) { showError(); return; }
 
     try {
-        // Resolve share → get presigned URL
         console.log('[FaceMog] Fetching share:', shareId);
         const res = await fetch(`${API_BASE}/v1/share/${shareId}`);
         if (!res.ok) throw new Error(`Share API returned ${res.status}`);
         const shareData = await res.json();
         console.log('[FaceMog] Share resolved, fetching result.json...');
 
-        // Fetch result.json
         const jsonRes = await fetch(shareData.jsonUrl);
         if (!jsonRes.ok) throw new Error(`Result JSON returned ${jsonRes.status}`);
         const data = await jsonRes.json();
@@ -48,7 +51,6 @@ let pinchDist = 0;
 })();
 
 function getShareId() {
-    // URL format: /s/{shareId} or ?id={shareId}
     const path = window.location.pathname;
     const match = path.match(/\/s\/([a-zA-Z0-9]+)/);
     if (match) return match[1];
@@ -58,11 +60,6 @@ function getShareId() {
 function showError() {
     document.getElementById('loading').style.display = 'none';
     document.getElementById('error').style.display = 'flex';
-}
-
-function setMetaTag(property, content) {
-    let tag = document.querySelector(`meta[property="${property}"]`);
-    if (tag) tag.setAttribute('content', content);
 }
 
 // ── Init ──
@@ -87,7 +84,6 @@ function initViewer(data) {
     if (data.uvs_b64) {
         const raw = decodeFloat32(data.uvs_b64);
         if (raw && raw.length === numVerts * 2) {
-            // Flip V for Three.js (bottom-left origin)
             uvs = new Float32Array(raw);
             for (let i = 1; i < uvs.length; i += 2) {
                 uvs[i] = 1.0 - uvs[i];
@@ -95,16 +91,22 @@ function initViewer(data) {
         }
     }
 
-    // Setup Three.js
+    // Show app FIRST so viewport has real dimensions
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('app').style.display = 'flex';
+
+    // Setup Three.js (now viewport has real dimensions)
     const canvas = document.getElementById('canvas');
     const viewport = document.getElementById('viewport');
 
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0a0a0f);
 
-    camera = new THREE.PerspectiveCamera(35, viewport.clientWidth / viewport.clientHeight, 0.01, 1000);
+    const w = viewport.clientWidth;
+    const h = viewport.clientHeight;
+    camera = new THREE.PerspectiveCamera(35, w / h, 0.01, 1000);
     renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-    renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+    renderer.setSize(w, h);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
     // Lights — bright studio rig
@@ -123,10 +125,6 @@ function initViewer(data) {
     if (uvs) geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
     geometry.computeVertexNormals();
 
-    // Center mesh
-    const center = computeCenter(origPositions, numVerts);
-    const meshOffset = new THREE.Vector3(-center[0], -center[1], -center[2]);
-
     // Material
     let mat;
     if (data.texture_b64 && uvs) {
@@ -144,19 +142,29 @@ function initViewer(data) {
         mat = new THREE.MeshPhongMaterial({ color: 0xd1b8a0, shininess: 40, specular: 0x222233, flatShading: false });
     }
 
+    // Build mesh inside a group for proper orientation
+    meshGroup = new THREE.Group();
     mesh = new THREE.Mesh(geometry, mat);
-    mesh.position.copy(meshOffset);
-    scene.add(mesh);
+    meshGroup.add(mesh);
+    scene.add(meshGroup);
 
-    // Camera setup — orient for face viewing
-    setupCamera(origPositions, numVerts, center);
+    // Orient mesh so face looks at camera using frame convention
+    // frame = [forwardAxis, hAxis, vAxis, forwardSign, vSign]
+    orientMesh(origPositions, numVerts);
 
     // Precompute deformation data
     precomputeTransforms();
 
+    // Check for ChadMaxx transforms
+    hasChadmaxx = transformDefs.some(d => d.chadmaxx_tag);
+
     // Apply default slider values (shows looksmaxxed version)
     for (const def of transformDefs) {
-        sliderValues[def.id] = def.default || 0;
+        if (def.chadmaxx_tag) {
+            sliderValues[def.id] = def.chadmaxx_target || 1.0;
+        } else {
+            sliderValues[def.id] = def.default || 0;
+        }
     }
     applyDeformations();
 
@@ -167,12 +175,53 @@ function initViewer(data) {
     setupControls(viewport);
     window.addEventListener('resize', onResize);
 
-    // Show app
-    document.getElementById('loading').style.display = 'none';
-    document.getElementById('app').style.display = 'flex';
-
     // Render loop
     requestAnimationFrame(animate);
+}
+
+// ── Orient mesh using frame convention (matching iOS app) ──
+function orientMesh(positions, n) {
+    const fwdAxis = Math.round(frame[0]);
+    const hAxis = Math.round(frame[1]);
+    const vAxis = Math.round(frame[2]);
+    const fwdSign = frame[3];
+    const vSign = frame.length > 4 ? frame[4] : 1.0;
+
+    // Compute center
+    const center = computeCenter(positions, n);
+
+    // Build rotation matrix:
+    //   mesh[hAxis]                    → view X (right)
+    //   mesh[vAxis] * vSign            → view Y (up)
+    //   mesh[forwardAxis] * -fwdSign   → view -Z (face towards camera at +Z)
+    const m = new THREE.Matrix4();
+    const e = [0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1]; // column-major 4x4
+    // Column 0 (view X): comes from mesh hAxis
+    e[hAxis * 4 + 0] = 1;
+    // Column 1 (view Y): comes from mesh vAxis * vSign
+    e[vAxis * 4 + 1] = vSign;
+    // Column 2 (view Z): comes from mesh fwdAxis * -fwdSign
+    // Face forward in scan space should point toward -Z in view (away from camera)
+    // Camera is at +Z looking at origin, so face forward = -Z means face looks at camera
+    e[fwdAxis * 4 + 2] = -fwdSign;
+    m.fromArray(e);
+
+    // Apply: first translate to center, then rotate
+    mesh.position.set(-center[0], -center[1], -center[2]);
+    meshGroup.setRotationFromMatrix(m);
+
+    // Compute bounding sphere in oriented space for camera distance
+    let maxR = 0;
+    for (let i = 0; i < n; i++) {
+        const dx = positions[i * 3] - center[0];
+        const dy = positions[i * 3 + 1] - center[1];
+        const dz = positions[i * 3 + 2] - center[2];
+        const r = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (r > maxR) maxR = r;
+    }
+
+    camDist = maxR * 3.2;
+    updateCamera();
 }
 
 // ── Base64 decode ──
@@ -206,33 +255,12 @@ function computeCenter(positions, n) {
     return [cx / n, cy / n, cz / n];
 }
 
-// ── Camera ──
-function setupCamera(positions, n, center) {
-    // Compute bounding sphere
-    let maxR = 0;
-    for (let i = 0; i < n; i++) {
-        const dx = positions[i * 3] - center[0];
-        const dy = positions[i * 3 + 1] - center[1];
-        const dz = positions[i * 3 + 2] - center[2];
-        const r = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (r > maxR) maxR = r;
-    }
-
-    camDist = maxR * 3.2;
-
-    // Orient camera using frame: face should look at camera
-    const fwdAxis = frame[0], fwdSign = frame[3];
-    // Start with slight angle (like the preview image)
-    camTheta = 0.3; // ~17 degrees
-    camPhi = 0.1;
-
-    updateCamera();
-}
-
+// ── Camera — yaw-only rotation (matching mobile app) ──
 function updateCamera() {
-    const x = camDist * Math.sin(camTheta) * Math.cos(camPhi);
-    const y = camDist * Math.sin(camPhi);
-    const z = camDist * Math.cos(camTheta) * Math.cos(camPhi);
+    // Camera orbits around Y axis only (yaw), no pitch
+    const x = camDist * Math.sin(yawAngle);
+    const y = 0;
+    const z = camDist * Math.cos(yawAngle);
     camera.position.set(x, y, z);
     camera.lookAt(0, 0, 0);
 }
@@ -273,7 +301,6 @@ function precomputeTransforms() {
     for (const def of transformDefs) {
         const subPre = [];
         for (const sub of def.transforms) {
-            // Use precomputed geodesic fields if available
             if (sub.vert_indices_b64 && sub.weights_b64 && sub.displacements_b64) {
                 const vertIndices = decodeUint32(sub.vert_indices_b64);
                 const weights = decodeFloat32(sub.weights_b64);
@@ -288,7 +315,6 @@ function precomputeTransforms() {
                 continue;
             }
 
-            // Fallback: compute from landmarks
             const lmPos = landmarks[sub.landmark];
             if (!lmPos) { subPre.push(null); continue; }
 
@@ -323,7 +349,14 @@ function precomputeTransforms() {
     }
 }
 
-// ── Deformation engine ──
+// ── Deformation engine (with ChadMaxx max override interpolation) ──
+function getEffectiveMaxMM(def) {
+    if (!def.chadmaxx_tag) return def.max_mm;
+    const normalMax = def.max_mm;
+    const chadMax = def.chadmaxx_max_mm || def.max_mm;
+    return normalMax + (chadMax - normalMax) * chadmaxxIntensity;
+}
+
 function applyDeformations() {
     deformedPositions.set(origPositions);
 
@@ -332,7 +365,8 @@ function applyDeformations() {
         const sliderVal = sliderValues[def.id] || 0;
         if (sliderVal < 0.001) continue;
 
-        const magnitude = sliderVal * def.max_mm;
+        const maxMM = getEffectiveMaxMM(def);
+        const magnitude = sliderVal * maxMM;
 
         for (let si = 0; si < def.transforms.length; si++) {
             const pre = precomputed[di] && precomputed[di][si];
@@ -342,7 +376,6 @@ function applyDeformations() {
             const { vertIndices, weights, operation } = pre;
 
             if (pre.useDisplacements && pre.displacements) {
-                // Use precomputed per-vertex displacement directions
                 for (let k = 0; k < vertIndices.length; k++) {
                     const i3 = vertIndices[k] * 3;
                     const k3 = k * 3;
@@ -377,7 +410,6 @@ function applyDeformations() {
         }
     }
 
-    // Update geometry
     geometry.attributes.position.needsUpdate = true;
     geometry.computeVertexNormals();
 }
@@ -399,6 +431,11 @@ function buildUI() {
 
     if (categories.length === 0) return;
     selectedCategory = categories[0];
+
+    // ChadMaxx master slider (if any transforms have chadmaxx_tag)
+    if (hasChadmaxx) {
+        buildChadmaxxSlider();
+    }
 
     // Category pills
     for (const cat of categories) {
@@ -425,7 +462,8 @@ function buildUI() {
             card.className = 'slider-card';
 
             const val = sliderValues[def.id] || 0;
-            const mm = (val * (def.max_mm_original || def.max_mm)).toFixed(1);
+            const effectiveMaxOriginal = getEffectiveMaxOriginal(def);
+            const mm = (val * effectiveMaxOriginal).toFixed(1);
 
             card.innerHTML = `
                 <div class="slider-header">
@@ -441,7 +479,8 @@ function buildUI() {
             input.addEventListener('input', () => {
                 const v = parseFloat(input.value);
                 sliderValues[def.id] = v;
-                const newMm = (v * (def.max_mm_original || def.max_mm)).toFixed(1);
+                if (def.chadmaxx_tag) manualOverrides.add(def.id);
+                const newMm = (v * getEffectiveMaxOriginal(def)).toFixed(1);
                 document.getElementById(`val-${def.id}`).textContent = `${newMm}mm`;
                 autoRotate = false;
                 applyDeformations();
@@ -452,31 +491,70 @@ function buildUI() {
     }
 }
 
-// ── Camera controls ──
+function getEffectiveMaxOriginal(def) {
+    if (!def.chadmaxx_tag) return def.max_mm_original || def.max_mm;
+    const normalMax = def.max_mm_original || def.max_mm;
+    const chadMax = def.chadmaxx_max_mm_original || def.chadmaxx_max_mm || normalMax;
+    return normalMax + (chadMax - normalMax) * chadmaxxIntensity;
+}
+
+function buildChadmaxxSlider() {
+    const chadEl = document.getElementById('chadmaxx');
+    if (!chadEl) return;
+
+    chadEl.style.display = 'block';
+    const pctLabel = document.getElementById('chadmaxx-pct');
+    const input = document.getElementById('chadmaxx-slider');
+
+    input.value = chadmaxxIntensity;
+    pctLabel.textContent = `${Math.round(chadmaxxIntensity * 100)}%`;
+
+    input.addEventListener('input', () => {
+        chadmaxxIntensity = parseFloat(input.value);
+        pctLabel.textContent = `${Math.round(chadmaxxIntensity * 100)}%`;
+
+        // Scale all non-overridden chadmaxx transforms
+        for (const def of transformDefs) {
+            if (!def.chadmaxx_tag || manualOverrides.has(def.id)) continue;
+            const target = def.chadmaxx_target || 1.0;
+            sliderValues[def.id] = chadmaxxIntensity * target;
+
+            // Update individual slider if visible
+            const slEl = document.getElementById(`slider-${def.id}`);
+            if (slEl) slEl.value = sliderValues[def.id];
+            const valEl = document.getElementById(`val-${def.id}`);
+            if (valEl) {
+                const mm = (sliderValues[def.id] * getEffectiveMaxOriginal(def)).toFixed(1);
+                valEl.textContent = `${mm}mm`;
+            }
+        }
+
+        autoRotate = false;
+        applyDeformations();
+    });
+}
+
+// ── Camera controls — yaw only + zoom ──
 function setupControls(el) {
     el.addEventListener('pointerdown', e => {
         pointerDown = true;
         lastX = e.clientX;
-        lastY = e.clientY;
         autoRotate = false;
     });
 
     el.addEventListener('pointermove', e => {
         if (!pointerDown) return;
         const dx = e.clientX - lastX;
-        const dy = e.clientY - lastY;
         lastX = e.clientX;
-        lastY = e.clientY;
-
-        camTheta -= dx * 0.008;
-        camPhi = Math.max(-Math.PI / 3, Math.min(Math.PI / 3, camPhi + dy * 0.008));
+        // Yaw only — horizontal drag rotates around Y axis
+        yawAngle -= dx * 0.008;
         updateCamera();
     });
 
     el.addEventListener('pointerup', () => { pointerDown = false; });
     el.addEventListener('pointerleave', () => { pointerDown = false; });
 
-    // Pinch zoom
+    // Scroll zoom
     el.addEventListener('wheel', e => {
         e.preventDefault();
         camDist *= e.deltaY > 0 ? 1.05 : 0.95;
@@ -484,7 +562,7 @@ function setupControls(el) {
         updateCamera();
     }, { passive: false });
 
-    // Touch pinch
+    // Touch pinch zoom
     el.addEventListener('touchstart', e => {
         if (e.touches.length === 2) {
             const dx = e.touches[0].clientX - e.touches[1].clientX;
@@ -512,10 +590,9 @@ function setupControls(el) {
 function animate(time) {
     requestAnimationFrame(animate);
 
-    // Auto-rotate slowly
     if (autoRotate) {
         const dt = lastTime ? (time - lastTime) / 1000 : 0;
-        camTheta += dt * 0.2; // ~12 deg/sec
+        yawAngle += dt * 0.2; // ~12 deg/sec
         updateCamera();
     }
     lastTime = time;
