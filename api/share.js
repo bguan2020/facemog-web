@@ -12,7 +12,22 @@ let templateHtml = null;
 
 function getTemplate() {
     if (!templateHtml) {
-        templateHtml = fs.readFileSync(path.join(__dirname, '..', 'share.html'), 'utf-8');
+        // Try multiple paths — Vercel bundles includeFiles relative to project root
+        const candidates = [
+            path.join(__dirname, '..', 'share.html'),
+            path.join(process.cwd(), 'share.html'),
+            path.join(__dirname, 'share.html'),
+        ];
+        for (const p of candidates) {
+            try {
+                templateHtml = fs.readFileSync(p, 'utf-8');
+                break;
+            } catch {}
+        }
+        if (!templateHtml) {
+            console.error('Could not find share.html template');
+            templateHtml = '<!DOCTYPE html><html><body>Error loading template</body></html>';
+        }
     }
     return templateHtml;
 }

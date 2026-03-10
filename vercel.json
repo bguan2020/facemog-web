@@ -1,5 +1,10 @@
 {
   "rewrites": [
     { "source": "/s/:shareId", "destination": "/api/share?id=:shareId" }
-  ]
+  ],
+  "functions": {
+    "api/share.js": {
+      "includeFiles": "share.html"
+    }
+  }
 }
