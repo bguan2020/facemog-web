@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>FaceMog — Face Analysis</title>
+<meta name="description" content="Interactive 3D face analysis — adjust the sliders to see the potential">
+<meta property="og:title" content="Check out my face analysis on FaceMog">
+<meta property="og:description" content="AI-powered 3D face analysis and looksmaxx recommendations">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Loading state -->
+<div id="loading">
+    <div class="loader-content">
+        <div class="spinner"></div>
+        <p class="loader-text">Loading face scan...</p>
+    </div>
+</div>
+
+<!-- Error state -->
+<div id="error" style="display:none">
+    <div class="error-content">
+        <p class="error-icon">&#128533;</p>
+        <h2>Link Expired</h2>
+        <p class="error-text">This shared scan has expired or is no longer available.</p>
+        <a class="cta" href="https://testflight.apple.com/join/d986dXMq">Try FaceMog Yourself</a>
+    </div>
+</div>
+
+<!-- Main viewer -->
+<div id="app" style="display:none">
+    <!-- 3D viewport -->
+    <div id="viewport">
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <!-- CTA banner -->
+    <div id="cta-banner">
+        <span class="cta-text">Want to scan your own face?</span>
+        <a class="cta-btn" href="https://testflight.apple.com/join/d986dXMq">Get FaceMog</a>
+    </div>
+
+    <!-- Bottom panel -->
+    <div id="panel">
+        <div id="panel-handle"><div class="handle-bar"></div></div>
+
+        <!-- Category pills -->
+        <div id="categories"></div>
+
+        <!-- Sliders -->
+        <div id="sliders"></div>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="viewer.js"></script>
+</body>
+</html>

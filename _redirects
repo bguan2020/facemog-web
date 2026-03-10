@@ -1,0 +1,2 @@
+# Serve share viewer for /s/{shareId} paths
+/s/*  /share.html  200
