@@ -8,6 +8,7 @@ let scene, camera, renderer, mesh, geometry;
 let origPositions, deformedPositions, displayPositions, vertexNormals;
 let numVerts, transformDefs, landmarks, frame;
 let precomputed = [];
+let boundaryTaper; // per-vertex taper weight (0 at boundary → 1 interior)
 let sliderValues = {};
 let selectedCategory = '';
 
@@ -103,6 +104,9 @@ function initViewer(data) {
         { src: fwdAxis, scale: -fwdSign }
     ];
     console.log('[FaceMog] Frame:', frame, '→ viewMap:', viewMap.map(v => `axis${v.src}*${v.scale}`));
+
+    // Compute boundary taper (must be before deformation)
+    boundaryTaper = computeBoundaryTaper(faces, numVerts);
 
     // Compute center in original mesh space
     meshCenter = computeCenter(origPositions, numVerts);
@@ -291,6 +295,76 @@ function computeCenter(positions, n) {
     return [cx / n, cy / n, cz / n];
 }
 
+// ── Boundary taper (matching iOS DeformationEngine) ──
+// Prevents mesh tearing at open edges by tapering deformation weight to 0 at boundaries.
+function computeBoundaryTaper(faces, nVerts) {
+    const taper = new Float32Array(nVerts);
+    taper.fill(1.0);
+
+    // Build adjacency and count faces per edge
+    const adj = new Array(nVerts);
+    for (let i = 0; i < nVerts; i++) adj[i] = new Set();
+    const edgeFaceCount = new Map();
+
+    const nFaces = faces.length / 3;
+    for (let f = 0; f < nFaces; f++) {
+        const f3 = f * 3;
+        const a = faces[f3], b = faces[f3 + 1], c = faces[f3 + 2];
+        adj[a].add(b); adj[a].add(c);
+        adj[b].add(a); adj[b].add(c);
+        adj[c].add(a); adj[c].add(b);
+
+        // Count each edge (ordered pair as key)
+        const edges = [[a, b], [b, c], [c, a]];
+        for (const [u, v] of edges) {
+            const key = u < v ? (u * 100000 + v) : (v * 100000 + u);
+            edgeFaceCount.set(key, (edgeFaceCount.get(key) || 0) + 1);
+        }
+    }
+
+    // Find boundary vertices (on edges shared by only 1 face)
+    const isBoundary = new Uint8Array(nVerts);
+    for (const [key, count] of edgeFaceCount) {
+        if (count === 1) {
+            const u = Math.floor(key / 100000);
+            const v = key % 100000;
+            isBoundary[u] = 1;
+            isBoundary[v] = 1;
+        }
+    }
+
+    // Ring 0: boundary vertices → taper = 0.0
+    let currentRing = new Set();
+    for (let i = 0; i < nVerts; i++) {
+        if (isBoundary[i]) {
+            taper[i] = 0.0;
+            currentRing.add(i);
+        }
+    }
+
+    // Propagate through rings: 0.3, 0.6, 0.85
+    const taperValues = [0.3, 0.6, 0.85];
+    const visited = new Set(currentRing);
+
+    for (const ringTaper of taperValues) {
+        const nextRing = new Set();
+        for (const vi of currentRing) {
+            for (const ni of adj[vi]) {
+                if (!visited.has(ni)) {
+                    taper[ni] = Math.min(taper[ni], ringTaper);
+                    nextRing.add(ni);
+                    visited.add(ni);
+                }
+            }
+        }
+        currentRing = nextRing;
+    }
+
+    const boundaryCount = Array.from(isBoundary).filter(x => x).length;
+    console.log(`[FaceMog] Boundary taper: ${boundaryCount} boundary verts, ${visited.size} total affected`);
+    return taper;
+}
+
 // ── Camera — yaw-only rotation (matching iOS ViewpointController.yawOnly) ──
 function updateCamera() {
     const x = camDist * Math.sin(yawAngle);
@@ -418,9 +492,10 @@ function applyDeformations() {
 
             if (pre.useDisplacements && pre.displacements) {
                 for (let k = 0; k < vertIndices.length; k++) {
-                    const i3 = vertIndices[k] * 3;
+                    const vi = vertIndices[k];
+                    const i3 = vi * 3;
                     const k3 = k * 3;
-                    const w = weights[k];
+                    const w = weights[k] * boundaryTaper[vi];
                     deformedPositions[i3] += pre.displacements[k3] * subMag * w;
                     deformedPositions[i3 + 1] += pre.displacements[k3 + 1] * subMag * w;
                     deformedPositions[i3 + 2] += pre.displacements[k3 + 2] * subMag * w;
@@ -430,8 +505,9 @@ function applyDeformations() {
                 const dy = pre.scanDir[1] * subMag;
                 const dz = pre.scanDir[2] * subMag;
                 for (let k = 0; k < vertIndices.length; k++) {
-                    const i3 = vertIndices[k] * 3;
-                    const w = weights[k];
+                    const vi = vertIndices[k];
+                    const i3 = vi * 3;
+                    const w = weights[k] * boundaryTaper[vi];
                     deformedPositions[i3] += dx * w;
                     deformedPositions[i3 + 1] += dy * w;
                     deformedPositions[i3 + 2] += dz * w;
@@ -440,9 +516,9 @@ function applyDeformations() {
                 const sign = operation === 'inflate' ? 1 : -1;
                 if (!vertexNormals) continue;
                 for (let k = 0; k < vertIndices.length; k++) {
-                    const idx = vertIndices[k];
-                    const i3 = idx * 3;
-                    const w = weights[k];
+                    const vi = vertIndices[k];
+                    const i3 = vi * 3;
+                    const w = weights[k] * boundaryTaper[vi];
                     deformedPositions[i3] += vertexNormals[i3] * sign * subMag * w;
                     deformedPositions[i3 + 1] += vertexNormals[i3 + 1] * sign * subMag * w;
                     deformedPositions[i3 + 2] += vertexNormals[i3 + 2] * sign * subMag * w;
