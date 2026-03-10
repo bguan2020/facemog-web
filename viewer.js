@@ -4,26 +4,30 @@
 const API_BASE = 'https://c969ue4f2j.execute-api.us-east-1.amazonaws.com/prod';
 
 // ── State ──
-let scene, camera, renderer, mesh, geometry, meshGroup;
-let origPositions, deformedPositions, vertexNormals;
+let scene, camera, renderer, mesh, geometry;
+let origPositions, deformedPositions, displayPositions, vertexNormals;
 let numVerts, transformDefs, landmarks, frame;
 let precomputed = [];
 let sliderValues = {};
 let selectedCategory = '';
 
+// View mapping (frame convention → Three.js standard coordinates)
+let viewMap = []; // [{src: axisIndex, scale: ±1}, ...] for X, Y, Z
+let meshCenter = [0, 0, 0];
+
 // ChadMaxx state
-let chadmaxxIntensity = 1.0; // Start at full intensity (like app)
+let chadmaxxIntensity = 1.0;
 let manualOverrides = new Set();
 let hasChadmaxx = false;
 
-// Camera orbit — yaw only (like mobile app)
+// Camera — yaw only (like mobile app)
 let yawAngle = 0.3; // ~17 deg starting angle
 let camDist = 0;
 let autoRotate = true;
 let lastTime = 0;
 
 // Touch/mouse state
-let pointerDown = false, lastX = 0, lastY = 0;
+let pointerDown = false, lastX = 0;
 let pinchDist = 0;
 
 // ── Entry point ──
@@ -73,11 +77,35 @@ function initViewer(data) {
     landmarks = data.landmarks || {};
     frame = data.frame || [2, 0, 1, 1, -1];
 
-    if (!positions || !faces) { showError(); return; }
+    if (!positions || !faces || numVerts === 0) {
+        console.error('[FaceMog] Missing mesh data');
+        showError();
+        return;
+    }
 
     origPositions = new Float32Array(positions);
     deformedPositions = new Float32Array(positions);
+    displayPositions = new Float32Array(numVerts * 3);
     vertexNormals = normals ? new Float32Array(normals) : null;
+
+    // Setup frame → view coordinate mapping
+    // frame = [forwardAxis, hAxis, vAxis, forwardSign, vSign]
+    // In Three.js: X=right, Y=up, Z=toward camera
+    // viewX = mesh[hAxis], viewY = mesh[vAxis]*vSign, viewZ = mesh[fwdAxis]*-fwdSign
+    const fwdAxis = Math.round(frame[0]);
+    const hAxis = Math.round(frame[1]);
+    const vAxis = Math.round(frame[2]);
+    const fwdSign = frame[3];
+    const vSign = frame.length > 4 ? frame[4] : 1.0;
+    viewMap = [
+        { src: hAxis, scale: 1 },
+        { src: vAxis, scale: vSign },
+        { src: fwdAxis, scale: -fwdSign }
+    ];
+    console.log('[FaceMog] Frame:', frame, '→ viewMap:', viewMap.map(v => `axis${v.src}*${v.scale}`));
+
+    // Compute center in original mesh space
+    meshCenter = computeCenter(origPositions, numVerts);
 
     // Decode UVs
     let uvs = null;
@@ -95,16 +123,16 @@ function initViewer(data) {
     document.getElementById('loading').style.display = 'none';
     document.getElementById('app').style.display = 'flex';
 
-    // Setup Three.js (now viewport has real dimensions)
+    // Setup Three.js
     const canvas = document.getElementById('canvas');
     const viewport = document.getElementById('viewport');
+    const w = viewport.clientWidth;
+    const h = viewport.clientHeight;
 
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0a0a0f);
 
-    const w = viewport.clientWidth;
-    const h = viewport.clientHeight;
-    camera = new THREE.PerspectiveCamera(35, w / h, 0.01, 1000);
+    camera = new THREE.PerspectiveCamera(35, w / h, 0.01, 100);
     renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setSize(w, h);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -118,16 +146,19 @@ function initViewer(data) {
     const back = new THREE.DirectionalLight(0x8888aa, 0.25);
     back.position.set(0, -1, -1); scene.add(back);
 
-    // Geometry
+    // Geometry — use displayPositions (remapped to view space)
     geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(deformedPositions, 3));
+    geometry.setAttribute('position', new THREE.BufferAttribute(displayPositions, 3));
     geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(faces), 1));
     if (uvs) geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-    geometry.computeVertexNormals();
 
-    // Material
+    // Material — DoubleSide handles any winding issues from coordinate remap
     let mat;
     if (data.texture_b64 && uvs) {
+        mat = new THREE.MeshPhongMaterial({
+            shininess: 20, specular: 0x111111, flatShading: false,
+            side: THREE.DoubleSide
+        });
         const texImg = new Image();
         texImg.onload = function() {
             const tex = new THREE.Texture(texImg);
@@ -135,22 +166,35 @@ function initViewer(data) {
             tex.flipY = false;
             mat.map = tex;
             mat.needsUpdate = true;
+            console.log('[FaceMog] Texture loaded');
+        };
+        texImg.onerror = function() {
+            console.error('[FaceMog] Texture failed to load');
+            mat.color = new THREE.Color(0xd1b8a0);
+            mat.needsUpdate = true;
         };
         texImg.src = `data:${data.textureMime || 'image/jpeg'};base64,${data.texture_b64}`;
-        mat = new THREE.MeshPhongMaterial({ shininess: 20, specular: 0x111111, flatShading: false });
     } else {
-        mat = new THREE.MeshPhongMaterial({ color: 0xd1b8a0, shininess: 40, specular: 0x222233, flatShading: false });
+        mat = new THREE.MeshPhongMaterial({
+            color: 0xd1b8a0, shininess: 40, specular: 0x222233,
+            flatShading: false, side: THREE.DoubleSide
+        });
     }
 
-    // Build mesh inside a group for proper orientation
-    meshGroup = new THREE.Group();
     mesh = new THREE.Mesh(geometry, mat);
-    meshGroup.add(mesh);
-    scene.add(meshGroup);
+    scene.add(mesh);
 
-    // Orient mesh so face looks at camera using frame convention
-    // frame = [forwardAxis, hAxis, vAxis, forwardSign, vSign]
-    orientMesh(origPositions, numVerts);
+    // Compute bounding sphere for camera distance (in original space)
+    let maxR = 0;
+    for (let i = 0; i < numVerts; i++) {
+        const dx = origPositions[i * 3] - meshCenter[0];
+        const dy = origPositions[i * 3 + 1] - meshCenter[1];
+        const dz = origPositions[i * 3 + 2] - meshCenter[2];
+        const r = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (r > maxR) maxR = r;
+    }
+    camDist = maxR * 3.2;
+    console.log('[FaceMog] Bounding radius:', maxR.toFixed(4), 'camDist:', camDist.toFixed(4));
 
     // Precompute deformation data
     precomputeTransforms();
@@ -158,70 +202,56 @@ function initViewer(data) {
     // Check for ChadMaxx transforms
     hasChadmaxx = transformDefs.some(d => d.chadmaxx_tag);
 
-    // Apply default slider values (shows looksmaxxed version)
+    // Apply default slider values — match iOS: ChadMaxx starts at chadMaxTarget, others at default
     for (const def of transformDefs) {
         if (def.chadmaxx_tag) {
-            sliderValues[def.id] = def.chadmaxx_target || 1.0;
+            sliderValues[def.id] = def.chadmaxx_target != null ? def.chadmaxx_target : 1.0;
         } else {
             sliderValues[def.id] = def.default || 0;
         }
     }
+
+    // Apply deformations and remap to view space
     applyDeformations();
+    updateDisplayPositions();
 
     // Build UI
     buildUI();
 
     // Events
-    setupControls(viewport);
+    const vp = document.getElementById('viewport');
+    setupControls(vp);
     window.addEventListener('resize', onResize);
+
+    // Initial camera position
+    updateCamera();
 
     // Render loop
     requestAnimationFrame(animate);
+    console.log('[FaceMog] Viewer initialized, numVerts:', numVerts, 'transforms:', transformDefs.length, 'chadmaxx:', hasChadmaxx);
 }
 
-// ── Orient mesh using frame convention (matching iOS app) ──
-function orientMesh(positions, n) {
-    const fwdAxis = Math.round(frame[0]);
-    const hAxis = Math.round(frame[1]);
-    const vAxis = Math.round(frame[2]);
-    const fwdSign = frame[3];
-    const vSign = frame.length > 4 ? frame[4] : 1.0;
+// ── Remap deformed positions from mesh space → Three.js view space ──
+function updateDisplayPositions() {
+    const cx = meshCenter[0], cy = meshCenter[1], cz = meshCenter[2];
+    const m0 = viewMap[0], m1 = viewMap[1], m2 = viewMap[2];
 
-    // Compute center
-    const center = computeCenter(positions, n);
+    for (let i = 0; i < numVerts; i++) {
+        const i3 = i * 3;
+        // Center in original space
+        const dx = deformedPositions[i3] - cx;
+        const dy = deformedPositions[i3 + 1] - cy;
+        const dz = deformedPositions[i3 + 2] - cz;
+        const centered = [dx, dy, dz];
 
-    // Build rotation matrix:
-    //   mesh[hAxis]                    → view X (right)
-    //   mesh[vAxis] * vSign            → view Y (up)
-    //   mesh[forwardAxis] * -fwdSign   → view -Z (face towards camera at +Z)
-    const m = new THREE.Matrix4();
-    const e = [0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1]; // column-major 4x4
-    // Column 0 (view X): comes from mesh hAxis
-    e[hAxis * 4 + 0] = 1;
-    // Column 1 (view Y): comes from mesh vAxis * vSign
-    e[vAxis * 4 + 1] = vSign;
-    // Column 2 (view Z): comes from mesh fwdAxis * -fwdSign
-    // Face forward in scan space should point toward -Z in view (away from camera)
-    // Camera is at +Z looking at origin, so face forward = -Z means face looks at camera
-    e[fwdAxis * 4 + 2] = -fwdSign;
-    m.fromArray(e);
-
-    // Apply: first translate to center, then rotate
-    mesh.position.set(-center[0], -center[1], -center[2]);
-    meshGroup.setRotationFromMatrix(m);
-
-    // Compute bounding sphere in oriented space for camera distance
-    let maxR = 0;
-    for (let i = 0; i < n; i++) {
-        const dx = positions[i * 3] - center[0];
-        const dy = positions[i * 3 + 1] - center[1];
-        const dz = positions[i * 3 + 2] - center[2];
-        const r = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (r > maxR) maxR = r;
+        // Remap axes
+        displayPositions[i3]     = centered[m0.src] * m0.scale;
+        displayPositions[i3 + 1] = centered[m1.src] * m1.scale;
+        displayPositions[i3 + 2] = centered[m2.src] * m2.scale;
     }
 
-    camDist = maxR * 3.2;
-    updateCamera();
+    geometry.attributes.position.needsUpdate = true;
+    geometry.computeVertexNormals();
 }
 
 // ── Base64 decode ──
@@ -232,7 +262,10 @@ function decodeFloat32(b64) {
         const buf = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
         return new Float32Array(buf.buffer);
-    } catch { return null; }
+    } catch (e) {
+        console.error('[FaceMog] Float32 decode failed:', e);
+        return null;
+    }
 }
 
 function decodeUint32(b64) {
@@ -242,7 +275,10 @@ function decodeUint32(b64) {
         const buf = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
         return new Uint32Array(buf.buffer);
-    } catch { return null; }
+    } catch (e) {
+        console.error('[FaceMog] Uint32 decode failed:', e);
+        return null;
+    }
 }
 
 function computeCenter(positions, n) {
@@ -255,17 +291,15 @@ function computeCenter(positions, n) {
     return [cx / n, cy / n, cz / n];
 }
 
-// ── Camera — yaw-only rotation (matching mobile app) ──
+// ── Camera — yaw-only rotation (matching iOS ViewpointController.yawOnly) ──
 function updateCamera() {
-    // Camera orbits around Y axis only (yaw), no pitch
     const x = camDist * Math.sin(yawAngle);
-    const y = 0;
     const z = camDist * Math.cos(yawAngle);
-    camera.position.set(x, y, z);
+    camera.position.set(x, 0, z);
     camera.lookAt(0, 0, 0);
 }
 
-// ── Coordinate frame ──
+// ── Coordinate frame helpers ──
 function canonToScan(canonDir) {
     const fwdAxis = Math.round(frame[0]);
     const hAxis = Math.round(frame[1]);
@@ -283,16 +317,13 @@ function gaussianFalloff(dist, radius) {
     const sigma = radius / 2.0;
     return Math.exp(-0.5 * (dist / sigma) ** 2);
 }
-
 function cosineFalloff(dist, radius) {
     if (dist >= radius) return 0;
     return 0.5 * (1 + Math.cos(Math.PI * dist / radius));
 }
-
 function linearFalloff(dist, radius) {
     return Math.max(0, 1.0 - dist / radius);
 }
-
 const FALLOFF = { gaussian: gaussianFalloff, cosine: cosineFalloff, linear: linearFalloff };
 
 // ── Precompute deformation data ──
@@ -349,11 +380,21 @@ function precomputeTransforms() {
     }
 }
 
-// ── Deformation engine (with ChadMaxx max override interpolation) ──
+// ── Deformation engine (matching iOS DeformationEngine + LooksmaxxViewModel) ──
+
+// Get effective max_mm for a transform, interpolated for ChadMaxx
 function getEffectiveMaxMM(def) {
     if (!def.chadmaxx_tag) return def.max_mm;
     const normalMax = def.max_mm;
-    const chadMax = def.chadmaxx_max_mm || def.max_mm;
+    const chadMax = def.chadmaxx_max_mm != null ? def.chadmaxx_max_mm : def.max_mm;
+    return normalMax + (chadMax - normalMax) * chadmaxxIntensity;
+}
+
+// Get effective max_mm_original for display (mm text)
+function getEffectiveMaxOriginal(def) {
+    if (!def.chadmaxx_tag) return def.max_mm_original || def.max_mm;
+    const normalMax = def.max_mm_original || def.max_mm;
+    const chadMax = def.chadmaxx_max_mm_original || def.chadmaxx_max_mm || normalMax;
     return normalMax + (chadMax - normalMax) * chadmaxxIntensity;
 }
 
@@ -370,7 +411,7 @@ function applyDeformations() {
 
         for (let si = 0; si < def.transforms.length; si++) {
             const pre = precomputed[di] && precomputed[di][si];
-            if (!pre) continue;
+            if (!pre || !pre.vertIndices || pre.vertIndices.length === 0) continue;
 
             const subMag = magnitude * pre.magnitudeScale;
             const { vertIndices, weights, operation } = pre;
@@ -410,8 +451,8 @@ function applyDeformations() {
         }
     }
 
-    geometry.attributes.position.needsUpdate = true;
-    geometry.computeVertexNormals();
+    // Update display positions (remap to view space)
+    updateDisplayPositions();
 }
 
 // ── UI ──
@@ -432,7 +473,7 @@ function buildUI() {
     if (categories.length === 0) return;
     selectedCategory = categories[0];
 
-    // ChadMaxx master slider (if any transforms have chadmaxx_tag)
+    // ChadMaxx master slider
     if (hasChadmaxx) {
         buildChadmaxxSlider();
     }
@@ -462,8 +503,7 @@ function buildUI() {
             card.className = 'slider-card';
 
             const val = sliderValues[def.id] || 0;
-            const effectiveMaxOriginal = getEffectiveMaxOriginal(def);
-            const mm = (val * effectiveMaxOriginal).toFixed(1);
+            const mm = (val * getEffectiveMaxOriginal(def)).toFixed(1);
 
             card.innerHTML = `
                 <div class="slider-header">
@@ -479,6 +519,7 @@ function buildUI() {
             input.addEventListener('input', () => {
                 const v = parseFloat(input.value);
                 sliderValues[def.id] = v;
+                // Track manual override for ChadMaxx transforms
                 if (def.chadmaxx_tag) manualOverrides.add(def.id);
                 const newMm = (v * getEffectiveMaxOriginal(def)).toFixed(1);
                 document.getElementById(`val-${def.id}`).textContent = `${newMm}mm`;
@@ -489,13 +530,9 @@ function buildUI() {
             sliderContainer.appendChild(card);
         }
     }
-}
 
-function getEffectiveMaxOriginal(def) {
-    if (!def.chadmaxx_tag) return def.max_mm_original || def.max_mm;
-    const normalMax = def.max_mm_original || def.max_mm;
-    const chadMax = def.chadmaxx_max_mm_original || def.chadmaxx_max_mm || normalMax;
-    return normalMax + (chadMax - normalMax) * chadmaxxIntensity;
+    // Expose renderSliders for ChadMaxx intensity changes
+    window._renderSliders = renderSliders;
 }
 
 function buildChadmaxxSlider() {
@@ -513,13 +550,13 @@ function buildChadmaxxSlider() {
         chadmaxxIntensity = parseFloat(input.value);
         pctLabel.textContent = `${Math.round(chadmaxxIntensity * 100)}%`;
 
-        // Scale all non-overridden chadmaxx transforms
+        // Match iOS: scale non-overridden ChadMaxx transforms to intensity * target
         for (const def of transformDefs) {
             if (!def.chadmaxx_tag || manualOverrides.has(def.id)) continue;
-            const target = def.chadmaxx_target || 1.0;
+            const target = def.chadmaxx_target != null ? def.chadmaxx_target : 1.0;
             sliderValues[def.id] = chadmaxxIntensity * target;
 
-            // Update individual slider if visible
+            // Update visible individual slider
             const slEl = document.getElementById(`slider-${def.id}`);
             if (slEl) slEl.value = sliderValues[def.id];
             const valEl = document.getElementById(`val-${def.id}`);
@@ -534,7 +571,7 @@ function buildChadmaxxSlider() {
     });
 }
 
-// ── Camera controls — yaw only + zoom ──
+// ── Camera controls — yaw only + zoom (matching iOS yawOnly mode) ──
 function setupControls(el) {
     el.addEventListener('pointerdown', e => {
         pointerDown = true;
@@ -546,7 +583,7 @@ function setupControls(el) {
         if (!pointerDown) return;
         const dx = e.clientX - lastX;
         lastX = e.clientX;
-        // Yaw only — horizontal drag rotates around Y axis
+        // Yaw only — horizontal drag rotates around Y
         yawAngle -= dx * 0.008;
         updateCamera();
     });
@@ -558,7 +595,7 @@ function setupControls(el) {
     el.addEventListener('wheel', e => {
         e.preventDefault();
         camDist *= e.deltaY > 0 ? 1.05 : 0.95;
-        camDist = Math.max(0.1, camDist);
+        camDist = Math.max(0.05, camDist);
         updateCamera();
     }, { passive: false });
 
@@ -578,7 +615,7 @@ function setupControls(el) {
             const newDist = Math.sqrt(dx * dx + dy * dy);
             if (pinchDist > 0) {
                 camDist *= pinchDist / newDist;
-                camDist = Math.max(0.1, camDist);
+                camDist = Math.max(0.05, camDist);
                 updateCamera();
             }
             pinchDist = newDist;
@@ -592,7 +629,7 @@ function animate(time) {
 
     if (autoRotate) {
         const dt = lastTime ? (time - lastTime) / 1000 : 0;
-        yawAngle += dt * 0.2; // ~12 deg/sec
+        yawAngle += dt * 0.2;
         updateCamera();
     }
     lastTime = time;
@@ -604,6 +641,7 @@ function onResize() {
     const viewport = document.getElementById('viewport');
     const w = viewport.clientWidth;
     const h = viewport.clientHeight;
+    if (w === 0 || h === 0) return;
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
     renderer.setSize(w, h);
