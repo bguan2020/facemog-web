@@ -64,9 +64,25 @@ body {
     flex: 1; position: relative; overflow: hidden;
     background: #0a0a0f;
     touch-action: none;
+    display: flex; flex-direction: column;
 }
-#viewport canvas {
+.viewport-half {
+    flex: 1; position: relative; overflow: hidden;
+    min-height: 0;
+}
+.viewport-half canvas {
     display: block; width: 100%; height: 100%;
+}
+.viewport-divider {
+    height: 1px; flex-shrink: 0;
+    background: rgba(255,255,255,0.1);
+}
+.viewport-label {
+    position: absolute; top: 8px; left: 12px;
+    font-size: 10px; font-weight: 700; letter-spacing: 1.5px;
+    color: rgba(255,255,255,0.35);
+    pointer-events: none;
+    text-transform: uppercase;
 }
 
 /* ── CTA Banner ── */

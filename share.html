@@ -38,9 +38,17 @@
 
 <!-- Main viewer -->
 <div id="app" style="display:none">
-    <!-- 3D viewport -->
+    <!-- 3D viewport — split before/after -->
     <div id="viewport">
-        <canvas id="canvas"></canvas>
+        <div id="before-half" class="viewport-half">
+            <canvas id="canvas-before"></canvas>
+            <span class="viewport-label">BEFORE</span>
+        </div>
+        <div class="viewport-divider"></div>
+        <div id="after-half" class="viewport-half">
+            <canvas id="canvas-after"></canvas>
+            <span class="viewport-label">AFTER</span>
+        </div>
     </div>
 
     <!-- CTA banner -->
