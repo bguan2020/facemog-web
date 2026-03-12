@@ -1,6 +1,9 @@
 {
   "rewrites": [
-    { "source": "/s/:shareId", "destination": "/api/share?id=:shareId" }
+    { "source": "/s/:shareId", "destination": "/api/share?id=:shareId" },
+    { "source": "/privacy", "destination": "/privacy.html" },
+    { "source": "/terms", "destination": "/terms.html" },
+    { "source": "/support", "destination": "/support.html" }
   ],
   "functions": {
     "api/share.js": {
